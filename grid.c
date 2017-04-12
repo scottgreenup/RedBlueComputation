@@ -45,6 +45,7 @@ void grid_copy(struct grid_t *self, const struct grid_t* source) {
     }
 }
 
+
 void grid_print_line(const struct grid_t *self, uint32_t tile_size) {
     fprintf(stderr, "+");
     for (uint32_t i = 0; i < self->size; i++) {
@@ -136,7 +137,7 @@ bool grid_check_tiles(
                     fprintf(stderr, "Finished.\n");
                     fprintf(
                         stderr,
-                        "Tile (r=%d, c=%d) has ratio %lf\% blue, above the %d\% threshold.\n",
+                        "Tile (r=%d, c=%d) has ratio %lf%% blue, above the %d%% threshold.\n",
                         tr,
                         tc,
                         ratio * 100.0,
@@ -151,13 +152,15 @@ bool grid_check_tiles(
                     fprintf(stderr, "Finished.\n");
                     fprintf(
                         stderr,
-                        "Tile (r=%d, c=%d) has ratio %lf\% red, above the %d\% threshold.\n",
+                        "Tile (r=%d, c=%d) has ratio %lf%% red, above the %d%% threshold.\n",
                         tr,
                         tc,
                         ratio * 100.0,
                         threshold);
                     return true;
                 }
+                break;
+            case WHITE:
                 break;
             }
         }
