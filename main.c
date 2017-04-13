@@ -16,11 +16,13 @@
 const int MPI_DEFAULT_TAG = 1;
 const int MPI_MASTER_ID = 0;
 
+// name, key, arg name, falgs, doc, group
 static struct argp_option options[] = {
     {"gridsize",  'n', "grid_size", 0, "Size of the grid."},
     {"tilesize",  't', "tile_size", 0, "Size of the tile."},
     {"threshold", 'c', "threshold", 0, "The threshold."},
     {"max_iters", 'm', "max_iters", 0, "Max iterations."},
+    {"verbose",   'v', 0,   0, "Verbose mode."},
     {0}
 };
 
@@ -29,6 +31,7 @@ struct arguments {
     uint32_t tile_size;
     uint32_t threshold;
     uint32_t max_iters;
+    bool verbose;
 };
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
@@ -38,6 +41,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
         case 't': args->tile_size = atoi(arg); break;
         case 'c': args->threshold = atoi(arg); break;
         case 'm': args->max_iters = atoi(arg); break;
+        case 'v': args->verbose = true; break;
     }
     return 0;
 }
@@ -206,10 +210,17 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             rows[i].cells, rows[i].len, MPI_INT,
             MPI_MASTER_ID, MPI_DEFAULT_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-        char buf[2048] = {0};
-        sprintf(buf, "Row %d: ", rows[i].id);
-        grid_row_print(&rows[i], buf);
-        fprintf(stderr, "%s\n", buf);
+        if (args.verbose) {
+            char buf[2048] = {0};
+            sprintf(buf, "Recv Row %d: ", rows[i].id);
+            grid_row_print(&rows[i], buf);
+            fprintf(stderr, "%d: %s\n", id, buf);
+        }
+    }
+
+
+    for (uint32_t i = 0; i < rows_len-1; i++) {
+        assert(rows[i].id < rows[i+1].id);
     }
 
     // This is the main action loop. Red -> Blue -> Check
@@ -239,16 +250,6 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             grid_row_free(&copy);
         }
 
-        // Perform Blue
-        // We have blues that need to move down for each of our rows.
-        // I need to ask the owner of a row if we can move the blue to that row.
-        // This can be achieved by requesting the row from the process.
-        // We can calculate which rows we want, and which rows people will want
-        // from us.
-
-        // Find our place in the cycle, we could have multiple spots in the
-        // cycle.
-
         // Calculate the IDs of the Row Groups we own.
         uint32_t rowgroups_len = (uint32_t)(rows_len / args.tile_size);
         uint32_t rowgroups_owned[rowgroups_len];
@@ -257,58 +258,73 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             rowgroups_owned[r] = get_rowgroup_id(&rows[row_id], args.tile_size);
         }
 
-        // Ascending sort.
+
+        // Ascending sort; just to make sure.
         qsort(rowgroups_owned, rowgroups_len, sizeof(int), compare);
+
+        MPI_Request requests[rowgroups_len];
+
+        // For each rowgroup, send our data to the owner of the previous row
+        for (uint32_t i = 0; i < rowgroups_len; i++) {
+            uint32_t rowgroup_id = rowgroups_owned[i];
+
+            // Foreach of our rowgroups. Send out first row to the rowgroup
+            // proceeding us. Therefore, get our first row in each rowgroup.
+
+            uint32_t row_id = rowgroup_id * args.tile_size;
+            struct grid_row_t* first = NULL;
+
+            // Get the first row back
+            for (uint32_t j = 0; j < rows_len; j++) {
+                if (rows[j].id == row_id) {
+                    first = &rows[j];
+                    break;
+                }
+            }
+
+            int32_t prev_row_id = first->id - 1;
+            if (prev_row_id < 0) {
+                prev_row_id = args.grid_size - 1;
+            }
+            uint32_t owner_id = row_owners[prev_row_id];
+
+            if (args.verbose) {
+                fprintf(
+                    stderr,
+                    "%d: Sending row %d to process %d\n",
+                    id, first->id, owner_id);
+            }
+
+            MPI_Isend(
+                &first->id,
+                1,
+                MPI_INT,
+                owner_id,
+                MPI_DEFAULT_TAG,
+                MPI_COMM_WORLD,
+                &requests[i]);
+
+            MPI_Isend(
+                &first->id,
+                1,
+                MPI_INT,
+                owner_id,
+                MPI_DEFAULT_TAG,
+                MPI_COMM_WORLD,
+                &requests[i]);
+        }
+
+        struct grid_row_t rows[rowgroups_len];
 
         for (uint32_t i = 0; i < rowgroups_len; i++) {
             uint32_t rowgroup_id = rowgroups_owned[i];
 
-            // Get the ID of the last row in the rowgroup
-            uint32_t row_id = rowgroup_id * args.tile_size + args.tile_size - 1;
-            uint32_t owner_id = row_owners[row_id];
-
-            // We want data on the next row for our blue movement
-            struct grid_row_t next_row;
-
-            if (rowgroup_id == 0) {
-
-                // We don't own the row, therefore ask the owner for the data.
-                if (owner_id != id) {
-                    grid_row_init(&next_row, args.grid_size);
-
-                    MPI_Send(
-                        &row_id,
-                        1,
-                        MPI_INT,
-                        owner_id,
-                        MPI_DEFAULT_TAG,
-                        MPI_COMM_WORLD);
-
-                    MPI_Recv(
-                        next_row.cells,
-                        args.grid_size,
-                        MPI_INT,
-                        owner_id,
-                        MPI_DEFAULT_TAG,
-                        MPI_COMM_WORLD,
-                        MPI_STATUS_IGNORE);
-
-                } else {
-                    for (int r = 0; r < rows_len; r++) {
-                        if (rows[r].id == row_id) {
-                            grid_row_copy(&next_row, &rows[r]);
-                        }
-                    }
-                }
-
-
-            } else {
-                // Recv, reply, then send to next
-            }
+            // We should've been sent row data, store it.
+            //MPI_Recv(
+            //    &
+            //);
         }
 
-        // TODO wait for the owner of the last row to contact us about
-        // row 0, if we own row 0.
     }
 }
 
@@ -335,6 +351,7 @@ int main(int argc, char** argv) {
     args.tile_size = 0;
     args.threshold = 0;
     args.max_iters = 0;
+    args.verbose = false;
     argp_parse(&argp, argc, argv, 0, 0, &args);
 
     assert(args.grid_size > 0);
@@ -343,6 +360,31 @@ int main(int argc, char** argv) {
     assert(args.max_iters > 0);
 
     args.tile_size = (uint32_t)(args.grid_size / args.tile_size);
+
+    /*
+    struct grid_row_t row;
+    grid_row_init(&row, 8);
+    row.id = 1;
+    row.len=8;
+    for (int i = 0; i < 8; i++) {
+        row.cells[i] = (enum cell_type)(i % 3);
+    }
+    void* sbuf = grid_row_serialize(&row);
+
+    uint32_t* ubuf = (uint32_t*)sbuf;
+    for (uint32_t i = 0; i < 10; i++) {
+        fprintf(stderr, "%d\n", ubuf[i]);
+    }
+
+    struct grid_row_t row_;
+    grid_row_unserialize(&row_, sbuf);
+
+    char buf[512] = {0};
+    grid_row_print(&row_, &buf[0]);
+    fprintf(stderr, "%s\n", buf);
+
+    return 1;
+    */
 
     if (id == MPI_MASTER_ID) {
         master(args, id, num_procs);
