@@ -59,7 +59,6 @@ void print_and_exit(uint32_t errnum, const char *message) {
 }
 
 void master(struct arguments args, uint32_t id, uint32_t num_procs) {
-
     assert(id == MPI_MASTER_ID);
 
     // Calculate the owner of each row: row[i] = process_id
@@ -115,7 +114,6 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
             for (uint32_t r = 0; r < args.grid_size; r++) {
                 struct grid_row_t row;
                 void* serialized_data = calloc(1, ser_size);
-                MPI_Status status;
                 MPI_Recv(
                     serialized_data,
                     ser_size,
@@ -123,7 +121,7 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
                     row_owners[r],
                     MPI_DEFAULT_TAG,
                     MPI_COMM_WORLD,
-                    &status);
+                    MPI_STATUS_IGNORE);
 
                 grid_row_unserialize(&row, serialized_data);
                 free(serialized_data);
@@ -143,13 +141,109 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
                 grid_row_free(&rows[r]);
             }
         }
+
+        size_t sz = (
+            sizeof(bool) +
+            sizeof(uint32_t) +
+            sizeof(uint32_t) +
+            sizeof(enum cell_type) +
+            sizeof(double));
+
+        bool done = false;
+
+        for (uint32_t p = 1; p < num_procs; p++) {
+            void* data = calloc(1, sz);
+            MPI_Recv(
+                data,
+                sz,
+                MPI_BYTE,
+                p,
+                MPI_DEFAULT_TAG,
+                MPI_COMM_WORLD,
+                MPI_STATUS_IGNORE);
+
+            bool finished = ((bool*)data)[0];
+            size_t cursor = sizeof(finished);
+
+            if (!finished) {
+                continue;
+            }
+
+            // Unpack all the data.
+            uint32_t tx = ((uint32_t*)(data + cursor))[0];
+            cursor += sizeof(tx);
+            uint32_t ty = ((uint32_t*)(data + cursor))[0];
+            cursor += sizeof(ty);
+            enum cell_type color = ((enum cell_type*)(data + cursor))[0];
+            cursor += sizeof(color);
+            double ratio = ((double*)(data + cursor))[0];
+
+            if (!done) {
+                fprintf(
+                    stderr,
+                    "Tile (%d, %d) has %f %s\n",
+                    tx,
+                    ty,
+                    ratio,
+                    color == BLUE ? "BLUE" : "RED");
+            }
+
+            done = true;
+        }
+
+        for (uint32_t p = 1; p < num_procs; p++) {
+            MPI_Send(
+                &done,
+                1,
+                MPI_INT,
+                p,
+                MPI_DEFAULT_TAG,
+                MPI_COMM_WORLD);
+        }
+
+        if (done) {
+            return;
+        }
+        fprintf(stderr, "Performed %d of %d iterations.\n", i+1, args.max_iters);
     }
+
 }
 
 int compare(const void * a, const void * b) {
     uint32_t _a = *(uint32_t*)a;
     uint32_t _b = *(uint32_t*)b;
     return a - b;
+}
+
+void master_finished(
+        bool finished,
+        uint32_t tx,
+        uint32_t ty,
+        enum cell_type color,
+        double ratio) {
+
+    // Serialize the data we want to send to master o.0
+    size_t sz = (
+        sizeof(finished) +
+        sizeof(tx) +
+        sizeof(ty) +
+        sizeof(color) +
+        sizeof(ratio));
+    size_t cursor = 0;
+    void* buf = calloc(1, sz);
+    memcpy(buf + cursor, &finished, sizeof(finished));
+    cursor += sizeof(finished);
+    memcpy(buf + cursor, &tx, sizeof(tx));
+    cursor += sizeof(tx);
+    memcpy(buf + cursor, &ty, sizeof(ty));
+    cursor += sizeof(ty);
+    memcpy(buf + cursor, &color, sizeof(color));
+    cursor += sizeof(color);
+    memcpy(buf + cursor, &ratio, sizeof(ratio));
+    cursor += sizeof(ratio);
+
+    // Send the data to master.
+    MPI_Send(buf, sz, MPI_BYTE, MPI_MASTER_ID, MPI_DEFAULT_TAG, MPI_COMM_WORLD);
 }
 
 uint32_t get_rowgroup_id(const struct grid_row_t* row, uint32_t tile_size) {
@@ -381,9 +475,7 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
                 &requests[i]);
         }
 
-        // TODO recv
         for (uint32_t i = 0; i < rowgroups_len; i++) {
-
             uint32_t rowgroup_id = rowgroups_owned[i];
 
             // Find row data of the last row of previous rowgroup
@@ -447,6 +539,75 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
                     MPI_DEFAULT_TAG,
                     MPI_COMM_WORLD,
                     &requests[i]);
+            }
+        }
+
+        sleep(0.5);
+
+        double threshold = args.threshold / 100.0;
+
+        for (uint32_t i = 0; i < rowgroups_len; i++) {
+            // get the tile_size rows and deal with it
+            // Get tile_size worth of rows, then check the square, count...
+
+            uint32_t row_start = i * args.tile_size;
+            uint32_t row_end = row_start + args.tile_size - 1;
+            uint32_t tiles_num = args.grid_size / args.tile_size;
+            uint32_t blue_counts[tiles_num];
+            uint32_t red_counts[tiles_num];
+
+            for (uint32_t j = 0; j < tiles_num; j++) {
+                blue_counts[j] = 0;
+                red_counts[j] = 0;
+            }
+
+
+            for (uint32_t r = row_start; r <= row_end; r++) {
+                for (uint32_t c = 0; c < args.grid_size; c++) {
+                    uint32_t t = c / args.tile_size;
+
+                    switch(rows[r].cells[c]) {
+                    case BLUE: blue_counts[t]++; break;
+                    case RED: red_counts[t]++; break;
+                    default: break;
+                    }
+
+                }
+            }
+
+            uint32_t cells_per_tile = (args.tile_size * args.tile_size);
+
+            for (uint32_t t = 0; t < tiles_num; t++) {
+                double blue_ratio = (double)(blue_counts[t]) / (double)(cells_per_tile);
+                uint32_t row_id = rows[i * args.tile_size].id;
+                uint32_t ty = row_id / args.tile_size;
+
+                if (blue_ratio >= threshold) {
+                    master_finished(true, t, ty, BLUE, blue_ratio);
+                    return;
+                }
+
+                double red_ratio = (double)(red_counts[t] / cells_per_tile);
+                if (red_ratio >= threshold) {
+                    master_finished(true, t, ty, RED, red_ratio);
+                    return;
+                }
+            }
+
+            master_finished(false, 0, 0, 0, 0);
+
+            bool finished;
+            MPI_Recv(
+                &finished,
+                1,
+                MPI_INT,
+                MPI_MASTER_ID,
+                MPI_DEFAULT_TAG,
+                MPI_COMM_WORLD,
+                MPI_STATUS_IGNORE);
+
+            if (finished) {
+                return;
             }
         }
     }
