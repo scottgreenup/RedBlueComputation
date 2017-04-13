@@ -145,7 +145,7 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
             MPI_COMM_WORLD);
     }
 
-    // Send the row data to relevant process
+    // Create and initialize the grid
     srand(time(NULL));
     struct grid_t grid_curr;
     grid_init(&grid_curr, args.grid_size);
@@ -153,6 +153,7 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
     struct grid_t grid_backup;
     grid_init_copy(&grid_backup, &grid_curr);
 
+    // Send the row data to relevant process
     for (uint32_t r = 0; r < args.grid_size; r++) {
         uint32_t dest = row_owners[r];
 
@@ -180,6 +181,8 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
 
     bool done = false;
     for (uint32_t i = 0; i < args.max_iters; i++) {
+
+        // Receive the rows from every process and print, acts as a sync.
         if (args.print) {
             struct grid_row_t rows[args.grid_size];
 
@@ -221,6 +224,8 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
             sizeof(enum cell_type) +
             sizeof(double));
 
+        // From each process, get whether or not that process has found a Tile
+        // that is over the threshold.
         for (uint32_t p = 1; p < num_procs; p++) {
             void* data = calloc(1, sz);
             MPI_Recv(
@@ -239,7 +244,7 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
                 continue;
             }
 
-            // Unpack all the data.
+            // Unpack all the data, inverse of master_finished(...)
             tx = ((uint32_t*)(data + cursor))[0];
             cursor += sizeof(tx);
             ty = ((uint32_t*)(data + cursor))[0];
@@ -252,23 +257,14 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
                 fprintf(
                     stderr,
                     "Tile (c=%d, r=%d) has %f%% %s\n",
-                    tx,
-                    ty,
-                    ratio * 100.0,
-                    color == BLUE ? "BLUE" : "RED");
+                    tx, ty, ratio * 100.0, color == BLUE ? "BLUE" : "RED");
                 done = true;
             }
 
         }
 
         for (uint32_t p = 1; p < num_procs; p++) {
-            MPI_Send(
-                &done,
-                1,
-                MPI_INT,
-                p,
-                MPI_DEFAULT_TAG,
-                MPI_COMM_WORLD);
+            MPI_Send(&done, 1, MPI_INT, p, MPI_DEFAULT_TAG, MPI_COMM_WORLD);
         }
 
         if (done) {
@@ -287,20 +283,22 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
     serial_check(&grid_backup, args);
 }
 
-
-
+// Comparison for qsort to sort uint32_t in ascending order
 int compare(const void * a, const void * b) {
     uint32_t _a = *(uint32_t*)a;
     uint32_t _b = *(uint32_t*)b;
     return a - b;
 }
 
+// A function to quickly that serializes a bunch of data for master. Used as a
+// part of the slave program.
 void master_finished(
-        bool finished,
-        uint32_t tx,
-        uint32_t ty,
-        enum cell_type color,
-        double ratio) {
+    bool finished,
+    uint32_t tx,
+    uint32_t ty,
+    enum cell_type color,
+    double ratio
+) {
 
     // Serialize the data we want to send to master o.0
     size_t sz = (
@@ -336,8 +334,13 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
 
     // Get the list of row owners from Master
     MPI_Recv(
-        row_owners, args.grid_size, MPI_INT,
-        MPI_MASTER_ID, MPI_DEFAULT_TAG, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        row_owners,
+        args.grid_size,
+        MPI_INT,
+        MPI_MASTER_ID,
+        MPI_DEFAULT_TAG,
+        MPI_COMM_WORLD,
+        MPI_STATUS_IGNORE);
 
     // Count how many rows we own
     uint32_t rows_len = 0;
@@ -351,7 +354,7 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
         return;
     }
 
-    // Get the row data from Master.
+    // Get the row data from Master that we are owning
     struct grid_row_t rows[rows_len];
     for (uint32_t i = 0; i < rows_len; i++) {
         grid_row_init(&rows[i], args.grid_size);
@@ -371,7 +374,6 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             fprintf(stderr, "%d: %s\n", id, buf);
         }
     }
-
 
     for (uint32_t i = 0; i < rows_len-1; i++) {
         assert(rows[i].id < rows[i+1].id);
@@ -404,7 +406,7 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             grid_row_free(&copy);
         }
 
-        // Perform blue.
+        // Perform blue...
 
         // Calculate the IDs of the Row Groups we own.
         uint32_t rowgroups_len = (uint32_t)(rows_len / args.tile_size);
@@ -416,15 +418,16 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
 
         // Ascending sort; just to make sure.
         qsort(rowgroups_owned, rowgroups_len, sizeof(int), compare);
+
+
+        // For each rowgroup, send our data to the owner of the row that is
+        // previous to the first row in the rowgroup.
+        // owner(rowgroup[row 0] - 1)
         MPI_Request requests[rowgroups_len];
         size_t ser_size = grid_row_serialize_size(args.grid_size);
-
         void* sers[rowgroups_len];
-
-        // For each rowgroup, send our data to the owner of the previous row
         for (uint32_t i = 0; i < rowgroups_len; i++) {
             uint32_t rowgroup_id = rowgroups_owned[i];
-
             uint32_t row_id = rowgroup_id * args.tile_size;
             struct grid_row_t* first = NULL;
 
@@ -454,16 +457,13 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
         struct grid_row_t recv_rows[rowgroups_len];
         struct grid_row_t send_rows[rowgroups_len];
 
+        // Receive the blue rows that we need to perform our blue movement.
+        // These are all the rows below our rowgroups. I.e. the blues in the
+        // last row of each rowgroup will want to move into one of these rows.
         for (uint32_t i = 0; i < rowgroups_len; i++) {
             uint32_t rowgroup_id = rowgroups_owned[i];
-
-            // the owner we are receiving from is the owner of the next
-            // rowgroup, get the row_id of the the first row of next rowgroup
             uint32_t row_id = rowgroup_id * args.tile_size + args.tile_size;
-            if (row_id == args.grid_size) {
-                row_id = 0;
-            }
-            uint32_t owner_id = row_owners[row_id];
+            uint32_t owner_id = row_owners[row_id % args.grid_size];
 
             // Recv the row from owner_id
             void* ser = calloc(1, ser_size);
@@ -482,20 +482,24 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             free(ser);
         }
 
+        // Wait for the asychronous sends to complete then free the memory.
         for (uint32_t i = 0; i < rowgroups_len; i++) {
             MPI_Wait(&requests[i], MPI_STATUS_IGNORE);
             free(sers[i]);
         }
 
+        // Create a backup of all the rows, we read from these when performing
+        // the blue movement.
         struct grid_row_t rows_copy[rows_len];
         for (uint32_t r = 0; r < rows_len; r++) {
             grid_row_copy(&rows_copy[r], &rows[r]);
         }
 
 
-        // Now we have all the rows we need to validate blue movement.
-        // Now we will move. We need to tell the owner of the rows what the rows
-        // will be.
+        // Now we have all the rows we need to validate blue movement. Therefore
+        // we will perform blue movement.
+        // Read from rows_copy.
+        // Write to rows/recv_rows/send_rows.
         for (uint32_t r = 0; r < rows_len; r++) {
             struct grid_row_t* curr = &rows[r];
             struct grid_row_t* next = NULL;
@@ -543,7 +547,8 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             }
         }
 
-        // We have moved all the blues, so update the owners of the blue
+        // We have moved all the blues. Including moving them into our borrowed
+        // rows. We need to update the original owners about the changes.
         for (uint32_t i = 0; i < rowgroups_len; i++) {
             sers[i] = grid_row_serialize(&send_rows[i]);
             MPI_Isend(

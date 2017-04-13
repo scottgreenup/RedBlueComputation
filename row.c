@@ -13,6 +13,7 @@ size_t grid_row_serialize_size(uint32_t grid_size) {
         sizeof(enum cell_type) * grid_size);
 }
 
+// Create a serialized buffer for MPI_Send of a grid_row_t
 void* grid_row_serialize(struct grid_row_t* self) {
     void* buf = calloc(1, grid_row_serialize_size(self->len));
 
@@ -26,6 +27,7 @@ void* grid_row_serialize(struct grid_row_t* self) {
     return buf;
 }
 
+// Unserialize the output from grid_row_serialize
 void grid_row_unserialize(struct grid_row_t* self, void* buf) {
     self->id = ((uint32_t*)buf)[0];
     self->len = ((uint32_t*)buf)[1];
@@ -36,16 +38,19 @@ void grid_row_unserialize(struct grid_row_t* self, void* buf) {
     memcpy(self->cells, cells_ptr, self->len * sizeof(enum cell_type));
 }
 
+// Intialize a grid_row_t
 void grid_row_init(struct grid_row_t *self, uint32_t len) {
     self->id = 0;
     self->len = len;
     self->cells = (enum cell_type*)calloc(len, sizeof(enum cell_type));
 }
 
+// Destroy a grid_row_t
 void grid_row_free(struct grid_row_t *self) {
     free(self->cells);
 }
 
+// Useful way to print a grid_row_t to a buffer
 void grid_row_print(struct grid_row_t *self, char* buf) {
     for (uint32_t c = 0; c < self->len; c++) {
         switch (self->cells[c]) {
@@ -57,6 +62,7 @@ void grid_row_print(struct grid_row_t *self, char* buf) {
     }
 }
 
+// Copy the grid_row_t into a new grid_row_t
 void grid_row_copy(struct grid_row_t *self, const struct grid_row_t *copy) {
     grid_row_init(self, copy->len);
     self->id = copy->id;
