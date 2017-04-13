@@ -24,7 +24,8 @@ static struct argp_option options[] = {
     {"tilesize",  't', "tile_size", 0, "Size of the tile."},
     {"threshold", 'c', "threshold", 0, "The threshold."},
     {"max_iters", 'm', "max_iters", 0, "Max iterations."},
-    {"verbose",   'v', 0,   0, "Verbose mode."},
+    {"verbose",   'v', 0,           0, "Verbose mode."},
+    {"print",     'p', 0,           0, "Print."},
     {0}
 };
 
@@ -34,6 +35,7 @@ struct arguments {
     uint32_t threshold;
     uint32_t max_iters;
     bool verbose;
+    bool print;
 };
 
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
@@ -44,6 +46,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
         case 'c': args->threshold = atoi(arg); break;
         case 'm': args->max_iters = atoi(arg); break;
         case 'v': args->verbose = true; break;
+        case 'p': args->print = true; break;
     }
     return 0;
 }
@@ -99,6 +102,48 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
             MPI_DEFAULT_TAG,
             MPI_COMM_WORLD);
     }
+
+    size_t ser_size = (
+        sizeof(uint32_t) +
+        sizeof(uint32_t) +
+        sizeof(enum cell_type) * args.grid_size);
+
+    for (uint32_t i = 0; i < args.max_iters; i++) {
+        if (args.print) {
+            struct grid_row_t rows[args.grid_size];
+
+            for (uint32_t r = 0; r < args.grid_size; r++) {
+                struct grid_row_t row;
+                void* serialized_data = calloc(1, ser_size);
+                MPI_Status status;
+                MPI_Recv(
+                    serialized_data,
+                    ser_size,
+                    MPI_BYTE,
+                    row_owners[r],
+                    MPI_DEFAULT_TAG,
+                    MPI_COMM_WORLD,
+                    &status);
+
+                grid_row_unserialize(&row, serialized_data);
+                free(serialized_data);
+
+                rows[row.id].id = row.id;
+                rows[row.id].len = row.len;
+                rows[row.id].cells = row.cells;
+            }
+
+            fprintf(stderr, "-----------\n");
+
+            for (uint32_t r = 0; r < args.grid_size; r++) {
+
+                char buf[2048] = {0};
+                grid_row_print(&rows[r], buf);
+                fprintf(stderr, "row %02d: %s\n", rows[r].id, buf);
+                grid_row_free(&rows[r]);
+            }
+        }
+    }
 }
 
 int compare(const void * a, const void * b) {
@@ -126,6 +171,10 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
         if (row_owners[r] == id) {
             rows_len++;
         }
+    }
+
+    if (rows_len == 0) {
+        return;
     }
 
     // Get the row data from Master.
@@ -214,13 +263,6 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
 
             int32_t prev_row_id = (first->id == 0 ? args.grid_size - 1 : first->id - 1);
             uint32_t owner_id = row_owners[prev_row_id];
-
-            if (args.verbose) {
-                fprintf(
-                    stderr,
-                    "%d: Sending row %d to process %d\n",
-                    id, first->id, owner_id);
-            }
 
             void* ser = grid_row_serialize(first);
 
@@ -394,13 +436,18 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             grid_row_free(&rows_copy[r]);
         }
 
-        sleep(1);
-
-        for (uint32_t i = 0; i < rows_len; i++) {
-            char buf[2048] = {0};
-            sprintf(buf, ">> ROW %d: ", rows[i].id);
-            grid_row_print(&rows[i], buf);
-            fprintf(stderr, "%d: %s\n", id, buf);
+        if (args.print) {
+            for (uint32_t i = 0; i < rows_len; i++) {
+                void* ser = grid_row_serialize(&rows[i]);
+                MPI_Isend(
+                    ser,
+                    ser_size,
+                    MPI_BYTE,
+                    0,
+                    MPI_DEFAULT_TAG,
+                    MPI_COMM_WORLD,
+                    &requests[i]);
+            }
         }
     }
 }
@@ -429,6 +476,7 @@ int main(int argc, char** argv) {
     args.threshold = 0;
     args.max_iters = 0;
     args.verbose = false;
+    args.print = false;
     argp_parse(&argp, argc, argv, 0, 0, &args);
 
     assert(args.grid_size > 0);
