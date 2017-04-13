@@ -266,19 +266,6 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             grid_row_init(&send_rows[i], recv_rows[i].len);
             send_rows[i].id = recv_rows[i].id;
             free(ser);
-
-            if (args.verbose) {
-                char row_buf[2048] = {0};
-                grid_row_print(&recv_rows[i], row_buf);
-
-                fprintf(
-                    stderr,
-                    "%d: Recv Row %d from %d: %s\n",
-                    id,
-                    recv_rows[i].id,
-                    owner_id,
-                    row_buf);
-            }
         }
 
         struct grid_row_t rows_copy[rows_len];
@@ -350,28 +337,19 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
                 MPI_DEFAULT_TAG,
                 MPI_COMM_WORLD,
                 &requests[i]);
-            fprintf(
-                stderr,
-                "%d: >>> Replying row %d to %d\n",
-                id, send_rows[i].id, row_owners[send_rows[i].id]);
         }
 
         // TODO recv
         for (uint32_t i = 0; i < rowgroups_len; i++) {
 
-            // Get the owner we are receiving from and the row_id that we are
-            // receiving
             uint32_t rowgroup_id = rowgroups_owned[i];
+
+            // Find row data of the last row of previous rowgroup
             uint32_t row_id = rowgroup_id * args.tile_size;
-            struct grid_row_t* first = NULL;
-            for (uint32_t j = 0; j < rows_len; j++) {
-                if (rows[j].id == row_id) {
-                    first = &rows[j];
-                    break;
-                }
-            }
-            uint32_t owner_id = row_owners[
-                (first->id == 0 ? args.grid_size - 1 : first->id - 1)];
+            row_id = (row_id ? row_id - 1 : args.grid_size - 1);
+            uint32_t owner_id = row_owners[row_id];
+
+            struct grid_row_t blue_row;
 
             void* ser = calloc(1, ser_size);
             MPI_Recv(
@@ -383,21 +361,46 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
                 MPI_COMM_WORLD,
                 MPI_STATUS_IGNORE
             );
-            grid_row_unserialize(&recv_rows[i], ser);
-            grid_row_init(&send_rows[i], recv_rows[i].len);
+            grid_row_unserialize(&blue_row, ser);
             free(ser);
+
+            struct grid_row_t* local_row = NULL;
+            for (uint32_t i = 0; i < rows_len; i++) {
+                if (rows[i].id == blue_row.id) {
+                    local_row = &rows[i];
+                }
+            }
+            assert(local_row != NULL);
+
+            char blue_row_buf[2048] = {0};
+            grid_row_print(&blue_row, blue_row_buf);
+
+            // blue_row contains the new blue items
+            for (uint32_t c = 0; c < args.grid_size; c++) {
+                if (blue_row.cells[c] == BLUE) {
+                    local_row->cells[c] = BLUE;
+                }
+            }
         }
 
         // Free the send buffers when the send actions have completed.
         for (uint32_t i = 0; i < rowgroups_len; i++) {
-            fprintf(stderr, "%d: Waiting.\n", id);
             MPI_Wait(&requests[i], MPI_STATUS_IGNORE);
-            fprintf(stderr, "%d: Waited.\n", id);
             free(sers[i]);
         }
 
+        // Free the row copies for this run iteration
         for (uint32_t r = 0; r < rows_len; r++) {
             grid_row_free(&rows_copy[r]);
+        }
+
+        sleep(1);
+
+        for (uint32_t i = 0; i < rows_len; i++) {
+            char buf[2048] = {0};
+            sprintf(buf, ">> ROW %d: ", rows[i].id);
+            grid_row_print(&rows[i], buf);
+            fprintf(stderr, "%d: %s\n", id, buf);
         }
     }
 }
@@ -440,8 +443,6 @@ int main(int argc, char** argv) {
     } else {
         slave(args, id, num_procs);
     }
-
-    fprintf(stderr, "Closing %d\n", id);
 
     MPI_Finalize();
     return 0;

@@ -5,9 +5,9 @@
 #include <stdint.h>
 
 enum cell_type {
+    WHITE = 0,
     BLUE,
-    RED,
-    WHITE
+    RED
 };
 
 struct grid_t {
