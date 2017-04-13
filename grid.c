@@ -45,6 +45,7 @@ void grid_copy(struct grid_t *self, const struct grid_t* source) {
     }
 }
 
+
 void grid_print_line(const struct grid_t *self, uint32_t tile_size) {
     fprintf(stderr, "+");
     for (uint32_t i = 0; i < self->size; i++) {
@@ -123,6 +124,8 @@ bool grid_check_tiles(
     }
 
     double ratio = 0.0;
+
+    bool completed = false;
     for (uint32_t r = 0; r < self->size; r++) {
         for (uint32_t c = 0; c < self->size; c++) {
             uint32_t tr = (int)(r / tile_size);
@@ -133,35 +136,35 @@ bool grid_check_tiles(
                 b_tiles[tr][tc]++;
                 ratio = b_tiles[tr][tc] / (double)(tile_size * tile_size);
                 if (ratio >= delta) {
-                    fprintf(stderr, "Finished.\n");
                     fprintf(
                         stderr,
-                        "Tile (r=%d, c=%d) has ratio %lf\% blue, above the %d\% threshold.\n",
-                        tr,
+                        "Tile (c=%d, r=%d) has %f%% BLUE\n",
                         tc,
+                        tr,
                         ratio * 100.0,
                         threshold);
-                    return true;
+                    completed = true;
                 }
                 break;
             case RED:
                 r_tiles[tr][tc]++;
                 ratio = r_tiles[tr][tc] / (double)(tile_size * tile_size);
                 if (ratio >= delta) {
-                    fprintf(stderr, "Finished.\n");
                     fprintf(
                         stderr,
-                        "Tile (r=%d, c=%d) has ratio %lf\% red, above the %d\% threshold.\n",
-                        tr,
+                        "Tile (c=%d, r=%d) has %f%% RED\n",
                         tc,
+                        tr,
                         ratio * 100.0,
                         threshold);
-                    return true;
+                    completed = true;
                 }
+                break;
+            case WHITE:
                 break;
             }
         }
     }
 
-    return false;
+    return completed;
 }
