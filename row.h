@@ -13,12 +13,15 @@ struct grid_row_t {
     enum cell_type* cells;
 };
 
-void* grid_row_serialize(struct grid_row_t* self) {
-    size_t size = (
+size_t grid_row_serialize_size(struct grid_row_t* self) {
+    return (
         sizeof(self->id) +
         sizeof(self->len) +
         sizeof(enum cell_type) * self->len);
-    void* buf = calloc(1, size);
+}
+
+void* grid_row_serialize(struct grid_row_t* self) {
+    void* buf = calloc(1, grid_row_serialize_size(self));
 
     memcpy(buf, &self->id, sizeof(self->id));
     size_t cur = sizeof(self->id);
@@ -32,10 +35,7 @@ void* grid_row_serialize(struct grid_row_t* self) {
 
 void grid_row_unserialize(struct grid_row_t* self, void* buf) {
     self->id = ((uint32_t*)buf)[0];
-    fprintf(stderr, "unserialize: id = %u\n", self->id);
-
     self->len = ((uint32_t*)buf)[1];
-    fprintf(stderr, "unserialize: len = %u\n", self->len);
 
     enum cell_type* cells_ptr = buf + (sizeof(self->id) + sizeof(self->len));
     self->cells = (enum cell_type*)malloc(sizeof(enum cell_type) * self->len);

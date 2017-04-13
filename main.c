@@ -1,7 +1,9 @@
 
 #include <assert.h>
 #include <argp.h>
+#include <execinfo.h>
 #include <mpi.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -97,77 +99,6 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
             MPI_DEFAULT_TAG,
             MPI_COMM_WORLD);
     }
-
-
-    return;
-
-    // The first tile_size go to 
-
-
-
-    // Initialize the grid with blue, red, and white cells
-    //srand(time(NULL));
-    //struct grid_t grid_curr;
-    //grid_init(&grid_curr, args.grid_size);
-
-    // Create copy of grid.
-    struct grid_t grid_p;
-    grid_init_copy(&grid_p, &grid_curr);
-
-    // Create 'immutable' copy to refer to when checking
-    struct grid_t grid_prev;
-    grid_init_copy(&grid_prev, &grid_curr);
-    grid_print(&grid_curr, args.tile_size);
-
-    uint32_t iterations = 0;
-    bool finished = false;
-    while (iterations < args.max_iters && !finished) {
-
-        // RED movement -- red can move right
-        for (uint32_t r = 0; r < args.grid_size; r++) {
-            for (uint32_t c = 0; c < args.grid_size; c++) {
-                if (grid_prev.elements[r][c] != RED) {
-                    continue;
-                }
-
-                uint32_t next = (c+1) % args.grid_size;
-                if (grid_prev.elements[r][next] != WHITE) {
-                    continue;
-                }
-
-                grid_curr.elements[r][c] = WHITE;
-                grid_curr.elements[r][next] = RED;
-            }
-        }
-
-        grid_copy(&grid_prev, &grid_curr);
-
-        // BLUE movement -- blue can move down
-        for (uint32_t r = 0; r < args.grid_size; r++) {
-            for (uint32_t c = 0; c < args.grid_size; c++) {
-                if (grid_prev.elements[r][c] != BLUE) {
-                    continue;
-                }
-
-                uint32_t next = (r+1) % args.grid_size;
-                if (grid_prev.elements[next][c] != WHITE) {
-                    continue;
-                }
-
-                grid_curr.elements[r][c] = WHITE;
-                grid_curr.elements[next][c] = BLUE;
-            }
-        }
-
-        grid_print(&grid_curr, args.tile_size);
-        grid_copy(&grid_prev, &grid_curr);
-
-        finished = grid_check_tiles(&grid_curr, args.tile_size, args.threshold);
-
-        iterations++;
-    }
-
-    fprintf(stderr, "Performed %d iterations.\n", iterations);
 }
 
 int compare(const void * a, const void * b) {
@@ -250,6 +181,8 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             grid_row_free(&copy);
         }
 
+        // Perform blue.
+
         // Calculate the IDs of the Row Groups we own.
         uint32_t rowgroups_len = (uint32_t)(rows_len / args.tile_size);
         uint32_t rowgroups_owned[rowgroups_len];
@@ -261,15 +194,12 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
 
         // Ascending sort; just to make sure.
         qsort(rowgroups_owned, rowgroups_len, sizeof(int), compare);
-
         MPI_Request requests[rowgroups_len];
+        size_t ser_size = grid_row_serialize_size(&rows[0]);
 
         // For each rowgroup, send our data to the owner of the previous row
         for (uint32_t i = 0; i < rowgroups_len; i++) {
             uint32_t rowgroup_id = rowgroups_owned[i];
-
-            // Foreach of our rowgroups. Send out first row to the rowgroup
-            // proceeding us. Therefore, get our first row in each rowgroup.
 
             uint32_t row_id = rowgroup_id * args.tile_size;
             struct grid_row_t* first = NULL;
@@ -282,10 +212,7 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
                 }
             }
 
-            int32_t prev_row_id = first->id - 1;
-            if (prev_row_id < 0) {
-                prev_row_id = args.grid_size - 1;
-            }
+            int32_t prev_row_id = (first->id == 0 ? args.grid_size - 1 : first->id - 1);
             uint32_t owner_id = row_owners[prev_row_id];
 
             if (args.verbose) {
@@ -295,36 +222,183 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
                     id, first->id, owner_id);
             }
 
+            void* ser = grid_row_serialize(first);
+
             MPI_Isend(
-                &first->id,
-                1,
-                MPI_INT,
+                ser,
+                ser_size,
+                MPI_BYTE,
                 owner_id,
                 MPI_DEFAULT_TAG,
                 MPI_COMM_WORLD,
                 &requests[i]);
 
-            MPI_Isend(
-                &first->id,
-                1,
-                MPI_INT,
-                owner_id,
-                MPI_DEFAULT_TAG,
-                MPI_COMM_WORLD,
-                &requests[i]);
+            // TODO Move outside... free after requests are done...
+            free(ser);
         }
 
-        struct grid_row_t rows[rowgroups_len];
+        struct grid_row_t recv_rows[rowgroups_len];
+        struct grid_row_t send_rows[rowgroups_len];
 
         for (uint32_t i = 0; i < rowgroups_len; i++) {
             uint32_t rowgroup_id = rowgroups_owned[i];
 
-            // We should've been sent row data, store it.
-            //MPI_Recv(
-            //    &
-            //);
+            // the owner we are receiving from is the owner of the next
+            // rowgroup, get the row_id of the the first row of next rowgroup
+            uint32_t row_id = rowgroup_id * args.tile_size + args.tile_size;
+            if (row_id == args.grid_size) {
+                row_id = 0;
+            }
+            uint32_t owner_id = row_owners[row_id];
+
+            // Recv the row from owner_id
+            void* ser = calloc(1, ser_size);
+            MPI_Recv(
+                ser,
+                ser_size,
+                MPI_BYTE,
+                owner_id,
+                MPI_DEFAULT_TAG,
+                MPI_COMM_WORLD,
+                MPI_STATUS_IGNORE
+            );
+            grid_row_unserialize(&recv_rows[i], ser);
+            grid_row_init(&send_rows[i], recv_rows[i].len);
+            send_rows[i].id = recv_rows[i].id;
+            free(ser);
+
+            if (args.verbose) {
+                char row_buf[2048] = {0};
+                grid_row_print(&recv_rows[i], row_buf);
+
+                fprintf(
+                    stderr,
+                    "%d: Recv Row %d from %d: %s\n",
+                    id,
+                    recv_rows[i].id,
+                    owner_id,
+                    row_buf);
+            }
         }
 
+        struct grid_row_t rows_copy[rows_len];
+        for (uint32_t r = 0; r < rows_len; r++) {
+            grid_row_copy(&rows_copy[r], &rows[r]);
+        }
+
+
+        // Now we have all the rows we need to validate blue movement.
+        // Now we will move. We need to tell the owner of the rows what the rows
+        // will be.
+        for (uint32_t r = 0; r < rows_len; r++) {
+            struct grid_row_t* curr = &rows[r];
+            struct grid_row_t* next = NULL;
+            struct grid_row_t* send = NULL;
+
+            uint32_t next_id = (rows[r].id + 1) % args.grid_size;
+
+            if (row_owners[next_id] == id) {
+                for (uint32_t j = 0; j < rows_len; j++) {
+                    if (rows[j].id == next_id) {
+                        next = &rows[j];
+                        break;
+                    }
+                }
+            } else {
+                for (uint32_t j = 0; j < rowgroups_len; j++) {
+                    if (recv_rows[j].id == next_id) {
+                        next = &recv_rows[j];
+                        send = &send_rows[j];
+                        break;
+                    }
+                }
+            }
+
+            assert(next != NULL);
+
+            struct grid_row_t* copy = &rows_copy[r];
+
+            for (uint32_t c = 0; c < rows[r].len; c++) {
+                if (copy->cells[c] != BLUE) {
+                    continue;
+                }
+
+                if (next->cells[c] != WHITE) {
+                    continue;
+                }
+
+                if (send != NULL) {
+                    send->cells[c] = BLUE;
+                    curr->cells[c] = WHITE;
+                } else {
+                    next->cells[c] = BLUE;
+                    curr->cells[c] = WHITE;
+                }
+            }
+        }
+
+        void* sers[rowgroups_len];
+
+        // We have moved all the blues, so update the owners of the blue
+        for (uint32_t i = 0; i < rowgroups_len; i++) {
+            sers[i] = grid_row_serialize(&send_rows[i]);
+            MPI_Isend(
+                sers[i],
+                ser_size,
+                MPI_BYTE,
+                row_owners[send_rows[i].id],
+                MPI_DEFAULT_TAG,
+                MPI_COMM_WORLD,
+                &requests[i]);
+            fprintf(
+                stderr,
+                "%d: >>> Replying row %d to %d\n",
+                id, send_rows[i].id, row_owners[send_rows[i].id]);
+        }
+
+        // TODO recv
+        for (uint32_t i = 0; i < rowgroups_len; i++) {
+
+            // Get the owner we are receiving from and the row_id that we are
+            // receiving
+            uint32_t rowgroup_id = rowgroups_owned[i];
+            uint32_t row_id = rowgroup_id * args.tile_size;
+            struct grid_row_t* first = NULL;
+            for (uint32_t j = 0; j < rows_len; j++) {
+                if (rows[j].id == row_id) {
+                    first = &rows[j];
+                    break;
+                }
+            }
+            uint32_t owner_id = row_owners[
+                (first->id == 0 ? args.grid_size - 1 : first->id - 1)];
+
+            void* ser = calloc(1, ser_size);
+            MPI_Recv(
+                ser,
+                ser_size,
+                MPI_BYTE,
+                owner_id,
+                MPI_DEFAULT_TAG,
+                MPI_COMM_WORLD,
+                MPI_STATUS_IGNORE
+            );
+            grid_row_unserialize(&recv_rows[i], ser);
+            grid_row_init(&send_rows[i], recv_rows[i].len);
+            free(ser);
+        }
+
+        // Free the send buffers when the send actions have completed.
+        for (uint32_t i = 0; i < rowgroups_len; i++) {
+            fprintf(stderr, "%d: Waiting.\n", id);
+            MPI_Wait(&requests[i], MPI_STATUS_IGNORE);
+            fprintf(stderr, "%d: Waited.\n", id);
+            free(sers[i]);
+        }
+
+        for (uint32_t r = 0; r < rows_len; r++) {
+            grid_row_free(&rows_copy[r]);
+        }
     }
 }
 
@@ -361,36 +435,13 @@ int main(int argc, char** argv) {
 
     args.tile_size = (uint32_t)(args.grid_size / args.tile_size);
 
-    /*
-    struct grid_row_t row;
-    grid_row_init(&row, 8);
-    row.id = 1;
-    row.len=8;
-    for (int i = 0; i < 8; i++) {
-        row.cells[i] = (enum cell_type)(i % 3);
-    }
-    void* sbuf = grid_row_serialize(&row);
-
-    uint32_t* ubuf = (uint32_t*)sbuf;
-    for (uint32_t i = 0; i < 10; i++) {
-        fprintf(stderr, "%d\n", ubuf[i]);
-    }
-
-    struct grid_row_t row_;
-    grid_row_unserialize(&row_, sbuf);
-
-    char buf[512] = {0};
-    grid_row_print(&row_, &buf[0]);
-    fprintf(stderr, "%s\n", buf);
-
-    return 1;
-    */
-
     if (id == MPI_MASTER_ID) {
         master(args, id, num_procs);
     } else {
         slave(args, id, num_procs);
     }
+
+    fprintf(stderr, "Closing %d\n", id);
 
     MPI_Finalize();
     return 0;
