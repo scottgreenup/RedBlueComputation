@@ -414,11 +414,12 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             rowgroups_owned[r] = get_rowgroup_id(&rows[row_id], args.tile_size);
         }
 
-
         // Ascending sort; just to make sure.
         qsort(rowgroups_owned, rowgroups_len, sizeof(int), compare);
         MPI_Request requests[rowgroups_len];
-        size_t ser_size = grid_row_serialize_size(&rows[0]);
+        size_t ser_size = grid_row_serialize_size(args.grid_size);
+
+        void* sers[rowgroups_len];
 
         // For each rowgroup, send our data to the owner of the previous row
         for (uint32_t i = 0; i < rowgroups_len; i++) {
@@ -438,19 +439,16 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             int32_t prev_row_id = (first->id == 0 ? args.grid_size - 1 : first->id - 1);
             uint32_t owner_id = row_owners[prev_row_id];
 
-            void* ser = grid_row_serialize(first);
+            sers[i] = grid_row_serialize(first);
 
             MPI_Isend(
-                ser,
+                sers[i],
                 ser_size,
                 MPI_BYTE,
                 owner_id,
                 MPI_DEFAULT_TAG,
                 MPI_COMM_WORLD,
                 &requests[i]);
-
-            // TODO Move outside... free after requests are done...
-            free(ser);
         }
 
         struct grid_row_t recv_rows[rowgroups_len];
@@ -482,6 +480,11 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
             grid_row_init(&send_rows[i], recv_rows[i].len);
             send_rows[i].id = recv_rows[i].id;
             free(ser);
+        }
+
+        for (uint32_t i = 0; i < rowgroups_len; i++) {
+            MPI_Wait(&requests[i], MPI_STATUS_IGNORE);
+            free(sers[i]);
         }
 
         struct grid_row_t rows_copy[rows_len];
@@ -539,8 +542,6 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
                 }
             }
         }
-
-        void* sers[rowgroups_len];
 
         // We have moved all the blues, so update the owners of the blue
         for (uint32_t i = 0; i < rowgroups_len; i++) {
@@ -734,9 +735,6 @@ int main(int argc, char** argv) {
     }
 
     MPI_Finalize();
-
-
-    // Perform serialized part.
 
     return 0;
 }

@@ -31,7 +31,7 @@ for any corresponding short options.
 ## Compiling and Running
 
 ```
-$ mpicc main.c grid.c -o main --std=c11
+$ mpicc *.c -o main --std=c11
 $ mpirun -np $NUM_PROCS  ./main -n 12 -t 3 -m 10 -c 75
 ```
 
