@@ -58,6 +58,70 @@ void print_and_exit(uint32_t errnum, const char *message) {
     exit(errnum);
 }
 
+void serial_check(struct grid_t* grid_curr, struct arguments args) {
+    fprintf(stderr, "Performing serial check.\n");
+
+    struct grid_t grid_prev;
+    grid_init_copy(&grid_prev, grid_curr);
+
+    uint32_t iterations = 0;
+    bool finished = false;
+    while (iterations < args.max_iters && !finished) {
+
+        // RED movement -- red can move right
+        for (uint32_t r = 0; r < args.grid_size; r++) {
+            for (uint32_t c = 0; c < args.grid_size; c++) {
+                if (grid_prev.elements[r][c] != RED) {
+                    continue;
+                }
+
+                uint32_t next = (c+1) % args.grid_size;
+                if (grid_prev.elements[r][next] != WHITE) {
+                    continue;
+                }
+
+                grid_curr->elements[r][c] = WHITE;
+                grid_curr->elements[r][next] = RED;
+            }
+        }
+
+        grid_copy(&grid_prev, grid_curr);
+
+        // BLUE movement -- blue can move down
+        for (uint32_t r = 0; r < args.grid_size; r++) {
+            for (uint32_t c = 0; c < args.grid_size; c++) {
+                if (grid_prev.elements[r][c] != BLUE) {
+                    continue;
+                }
+
+                uint32_t next = (r+1) % args.grid_size;
+                if (grid_prev.elements[next][c] != WHITE) {
+                    continue;
+                }
+
+                grid_curr->elements[r][c] = WHITE;
+                grid_curr->elements[next][c] = BLUE;
+            }
+        }
+
+        grid_copy(&grid_prev, grid_curr);
+        finished = grid_check_tiles(grid_curr, args.tile_size, args.threshold);
+        iterations++;
+
+        if (args.print) {
+            grid_print(grid_curr, args.tile_size);
+        }
+    }
+
+    if (!args.print) {
+        grid_print(grid_curr, args.tile_size);
+    }
+
+    if (!finished) {
+        fprintf(stderr, "Serial: Hit maximum iterations\n");
+    }
+}
+
 void master(struct arguments args, uint32_t id, uint32_t num_procs) {
     assert(id == MPI_MASTER_ID);
 
@@ -86,6 +150,9 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
     struct grid_t grid_curr;
     grid_init(&grid_curr, args.grid_size);
 
+    struct grid_t grid_backup;
+    grid_init_copy(&grid_backup, &grid_curr);
+
     for (uint32_t r = 0; r < args.grid_size; r++) {
         uint32_t dest = row_owners[r];
 
@@ -107,6 +174,11 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
         sizeof(uint32_t) +
         sizeof(enum cell_type) * args.grid_size);
 
+    uint32_t tx, ty;
+    enum cell_type color;
+    double ratio;
+
+    bool done = false;
     for (uint32_t i = 0; i < args.max_iters; i++) {
         if (args.print) {
             struct grid_row_t rows[args.grid_size];
@@ -149,8 +221,6 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
             sizeof(enum cell_type) +
             sizeof(double));
 
-        bool done = false;
-
         for (uint32_t p = 1; p < num_procs; p++) {
             void* data = calloc(1, sz);
             MPI_Recv(
@@ -170,25 +240,25 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
             }
 
             // Unpack all the data.
-            uint32_t tx = ((uint32_t*)(data + cursor))[0];
+            tx = ((uint32_t*)(data + cursor))[0];
             cursor += sizeof(tx);
-            uint32_t ty = ((uint32_t*)(data + cursor))[0];
+            ty = ((uint32_t*)(data + cursor))[0];
             cursor += sizeof(ty);
-            enum cell_type color = ((enum cell_type*)(data + cursor))[0];
+            color = ((enum cell_type*)(data + cursor))[0];
             cursor += sizeof(color);
-            double ratio = ((double*)(data + cursor))[0];
+            ratio = ((double*)(data + cursor))[0];
 
             if (!done) {
                 fprintf(
                     stderr,
-                    "Tile (%d, %d) has %f %s\n",
+                    "Tile (c=%d, r=%d) has %f%% %s\n",
                     tx,
                     ty,
-                    ratio,
+                    ratio * 100.0,
                     color == BLUE ? "BLUE" : "RED");
+                done = true;
             }
 
-            done = true;
         }
 
         for (uint32_t p = 1; p < num_procs; p++) {
@@ -202,12 +272,22 @@ void master(struct arguments args, uint32_t id, uint32_t num_procs) {
         }
 
         if (done) {
-            return;
+            break;
         }
-        fprintf(stderr, "Performed %d of %d iterations.\n", i+1, args.max_iters);
+
+        if (args.verbose) {
+            fprintf(stderr, "Performed %d of %d iterations.\n", i+1, args.max_iters);
+        }
     }
 
+    if (!done) {
+        fprintf(stderr, "MPI: Hit maximum iterations\n");
+    }
+
+    serial_check(&grid_backup, args);
 }
+
+
 
 int compare(const void * a, const void * b) {
     uint32_t _a = *(uint32_t*)a;
@@ -594,27 +674,27 @@ void slave(struct arguments args, uint32_t id, uint32_t num_procs) {
                 }
             }
 
-            master_finished(false, 0, 0, 0, 0);
+        }
 
-            bool finished;
-            MPI_Recv(
-                &finished,
-                1,
-                MPI_INT,
-                MPI_MASTER_ID,
-                MPI_DEFAULT_TAG,
-                MPI_COMM_WORLD,
-                MPI_STATUS_IGNORE);
+        master_finished(false, 0, 0, 0, 0);
 
-            if (finished) {
-                return;
-            }
+        bool finished;
+        MPI_Recv(
+            &finished,
+            1,
+            MPI_INT,
+            MPI_MASTER_ID,
+            MPI_DEFAULT_TAG,
+            MPI_COMM_WORLD,
+            MPI_STATUS_IGNORE);
+
+        if (finished) {
+            return;
         }
     }
 }
 
 int main(int argc, char** argv) {
-
     uint32_t id;
     uint32_t num_procs;
     uint32_t retval;
@@ -654,5 +734,9 @@ int main(int argc, char** argv) {
     }
 
     MPI_Finalize();
+
+
+    // Perform serialized part.
+
     return 0;
 }
