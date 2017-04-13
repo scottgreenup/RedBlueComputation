@@ -12,12 +12,15 @@ Cells wrap around to the top or left if they hit a wall.
 ## Help
 
 ```
+$ ./main --help
 Usage: main [OPTION...]
 
   -c, --threshold=threshold  The threshold.
   -m, --max_iters=max_iters  Max iterations.
   -n, --gridsize=grid_size   Size of the grid.
+  -p, --print                Print.
   -t, --tilesize=tile_size   Size of the tile.
+  -v, --verbose              Verbose mode.
   -?, --help                 Give this help list
       --usage                Give a short usage message
 
@@ -28,8 +31,8 @@ for any corresponding short options.
 ## Compiling and Running
 
 ```
-$ gcc main.c -o main
-$ ./main --gridsize 12 --tilesize 3 --threshold 90 -max_iters 1000
+$ mpicc main.c grid.c -o main --std=c11
+$ mpirun -np $NUM_PROCS  ./main -n 12 -t 3 -m 10 -c 75
 ```
 
 
